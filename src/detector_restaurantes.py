@@ -90,7 +90,9 @@ TIPOS_SIN_RESERVA = {
 # Text Search también devuelve lugares que no son de comida (un hospital, por
 # ejemplo). Se conservan los tipos con "restaurant" o "bar" como palabra, estos
 # tipos de comida sueltos y los que no traen tipo (mejor revisar que perder).
-TIPOS_COMIDA_EXTRA = TIPOS_SIN_RESERVA | {"cafeteria", "pub", "diner", "bistro"}
+TIPOS_COMIDA_EXTRA = TIPOS_SIN_RESERVA | {
+    "cafeteria", "pub", "diner", "bistro", "steak_house", "pizza_delivery",
+}
 
 MAX_WORKERS = 10
 TIMEOUT = 10
