@@ -73,6 +73,12 @@ UMBRAL_MEDIA_FALLBACK = 100
 MAX_WORKERS = 10
 TIMEOUT = 10
 
+# Reintentos ante errores temporales de Places (429 por ráfaga, 5xx).
+# Espera 2, 4 y 8 s: suficiente para una ráfaga, sin alargar mucho la ejecución.
+# Si se agotó la cuota diaria, el 429 persiste y el error se propaga igual.
+PLACES_REINTENTOS = 3
+PLACES_ESPERA_BASE = 2
+
 # Días mínimos entre la primera foto del historial y hoy para calcular
 # reseñas/mes (con menos días, la cifra es demasiado ruidosa).
 MIN_DIAS_HISTORIAL = 14
@@ -186,6 +192,23 @@ HEADER_DOMINIOS = [
 # Google Places
 # ---------------------------------------------------------------------------
 
+def post_con_reintentos(url: str, headers: dict, body: dict) -> dict:
+    for intento in range(PLACES_REINTENTOS + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=30)
+        except requests.RequestException:
+            if intento == PLACES_REINTENTOS:
+                raise
+        else:
+            temporal = resp.status_code == 429 or resp.status_code >= 500
+            if not temporal or intento == PLACES_REINTENTOS:
+                resp.raise_for_status()
+                return resp.json()
+        espera = PLACES_ESPERA_BASE * 2 ** intento
+        print(f"  Error temporal en Places, reintento en {espera} s...")
+        time.sleep(espera)
+
+
 def search_places(query: str) -> list[dict]:
     headers = {
         "Content-Type": "application/json",
@@ -196,9 +219,7 @@ def search_places(query: str) -> list[dict]:
     results = []
 
     while True:
-        resp = requests.post(PLACES_URL, headers=headers, json=body, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        data = post_con_reintentos(PLACES_URL, headers, body)
         results.extend(data.get("places", []))
 
         token = data.get("nextPageToken")
