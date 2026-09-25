@@ -215,12 +215,13 @@ def search_places(query: str) -> list[dict]:
 # Análisis de webs
 # ---------------------------------------------------------------------------
 
-def fetch(url: str) -> str | None:
+def fetch(url: str) -> tuple[str, str] | None:
+    """Devuelve (URL final tras redirecciones, HTML en minúsculas)."""
     try:
         r = requests.get(url, headers=HTTP_HEADERS, timeout=TIMEOUT, allow_redirects=True)
         if r.status_code >= 400:
             return None
-        return r.text.lower()
+        return r.url, r.text.lower()
     except requests.RequestException:
         return None
 
@@ -236,11 +237,11 @@ def es_ignorado(dominio: str) -> bool:
 
 def find_reservation_pages(html: str, base_url: str, limit: int = 2) -> list[str]:
     """Links de la misma web que parecen página de reservas."""
-    base_domain = urlparse(base_url).netloc
+    base_domain = normalizar_dominio(urlparse(base_url).netloc)
     links = []
     for href in HREF_RE.findall(html):
         full = urljoin(base_url, href)
-        if urlparse(full).netloc != base_domain:
+        if normalizar_dominio(urlparse(full).netloc) != base_domain:
             continue
         if any(h in full.lower() for h in RESERVATION_LINK_HINTS) and full not in links:
             links.append(full)
@@ -274,16 +275,17 @@ def analyze(place: dict) -> dict:
     if not website:
         estado = ESTADO_GOOGLE if reservable else ESTADO_SIN_WEB
     else:
-        html = fetch(website)
-        if html is None:
+        home = fetch(website)
+        if home is None:
             estado = ESTADO_NO_ACCESIBLE
         else:
-            dominio_propio = normalizar_dominio(urlparse(website).netloc)
-            paginas = [(website, html)]
-            for link in find_reservation_pages(html, website):
+            url_final, html = home
+            dominio_propio = normalizar_dominio(urlparse(url_final).netloc)
+            paginas = [home]
+            for link in find_reservation_pages(html, url_final):
                 sub = fetch(link)
                 if sub:
-                    paginas.append((link, sub))
+                    paginas.append(sub)
 
             full_html = "\n".join(h for _, h in paginas)
             sistemas = detect(full_html, BOOKING_SIGNATURES)
