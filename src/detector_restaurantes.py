@@ -78,6 +78,15 @@ PERCENTIL_MEDIA = 25
 UMBRAL_ALTA_FALLBACK = 300
 UMBRAL_MEDIA_FALLBACK = 100
 
+# Tipos de local (primaryType de Places) que casi nunca toman reservas: mucho
+# público de paso inflan las reseñas sin generar llamadas. SUPUESTO sin validar:
+# prioridad Baja fija (no Descartar) hasta confirmarlo con la validación manual.
+TIPOS_SIN_RESERVA = {
+    "cafe", "coffee_shop", "tea_house", "bakery", "confectionery",
+    "dessert_shop", "ice_cream_shop", "juice_shop", "donut_shop", "bagel_shop",
+    "fast_food_restaurant", "sandwich_shop", "meal_takeaway", "food_court",
+}
+
 MAX_WORKERS = 10
 TIMEOUT = 10
 
@@ -169,6 +178,7 @@ FIELD_MASK = ",".join([
     "places.googleMapsUri",
     "places.reservable",
     "places.addressComponents",
+    "places.primaryType",
     "nextPageToken",
 ])
 
@@ -191,6 +201,7 @@ VEREDICTOS_DESCARTE = set(VEREDICTOS) - {VEREDICTO_CONFIRMADO}
 # Columnas de la pestaña "resultados": (encabezado, clave del diccionario)
 COLUMNAS = [
     ("Nombre", "nombre"),
+    ("Tipo", "tipo"),
     ("Dirección", "direccion"),
     ("Teléfono", "telefono"),
     ("Web", "web"),
@@ -363,6 +374,7 @@ def analyze(place: dict) -> dict:
 
     return {
         "nombre": place.get("displayName", {}).get("text", ""),
+        "tipo": place.get("primaryType", ""),
         "direccion": place.get("formattedAddress", ""),
         "telefono": place.get("nationalPhoneNumber", ""),
         "web": website,
@@ -402,8 +414,10 @@ def asignar_prioridad(filas: list[dict]) -> tuple[float, float]:
             f["prioridad"] = "Descartar"
             continue
         # Reserve with Google solo funciona vía partners: casi seguro tienen un
-        # sistema que no detectamos. Baja fija hasta validar a mano algunos casos.
-        if f["estado"] == ESTADO_GOOGLE and f["validacion"] != VEREDICTO_CONFIRMADO:
+        # sistema que no detectamos. Tipos de local de paso: casi nunca reservan.
+        # En ambos casos, Baja fija hasta validar a mano algunos casos.
+        sin_reserva = f["estado"] == ESTADO_GOOGLE or f["tipo"] in TIPOS_SIN_RESERVA
+        if sin_reserva and f["validacion"] != VEREDICTO_CONFIRMADO:
             f["prioridad"] = "Baja"
             continue
         if f["resenas"] >= umbral_alta:
