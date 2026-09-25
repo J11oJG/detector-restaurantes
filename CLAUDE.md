@@ -18,19 +18,20 @@ En España el software de reservas está concentrado en dos actores: **CoverMana
 1. Busca restaurantes con **Google Places API (New) – Text Search** usando las consultas de `QUERIES` (hoy: distrito de Les Corts: Les Corts, Pedralbes, La Maternitat i Sant Ramon). Cada consulta devuelve máximo 60 resultados, por eso se divide por barrio y tipo de cocina. Deduplica por Place ID.
 2. Descarga la web de cada restaurante (home + hasta 2 páginas que parezcan de reservas) con 10 hilos en paralelo y timeout de 10 s.
 3. Busca **firmas** de sistemas de reservas conocidos (`BOOKING_SIGNATURES`) y señales de reserva manual (`MANUAL_SIGNALS`: WhatsApp, teléfono, en español y catalán).
-4. Clasifica cada restaurante en un estado: `Usa sistema`, `Sin sistema detectado`, `Reservable en Google (proveedor no identificado)`, `Sin web`, `Web no accesible`.
-5. **Prioriza** por percentiles de número de reseñas calculados sobre los datos de cada ejecución (p75 = Alta, p25 = Media, resto Baja; respaldo fijo 300/100 si hay pocos datos). `Usa sistema` = Descartar. Los "Reservable en Google" bajan un nivel.
+4. Clasifica cada restaurante en un estado: `Usa sistema`, `Sin sistema detectado`, `Reservable en Google (proveedor no identificado)`, `Sin web`, `Solo redes sociales`, `Web no accesible`. Candidatos = `Sin sistema detectado`, `Sin web`, `Solo redes sociales` (vocabulario en `CONTEXT.md`).
+5. **Prioriza** por percentiles de número de reseñas calculados sobre los datos de cada ejecución (p75 = Alta, p25 = Media, resto Baja; respaldo fijo 300/100 si hay pocos datos). `Usa sistema` = Descartar. "Reservable en Google" = Baja fija (Reserve with Google implica un partner; revisar tras validar 3–4 casos). Los veredictos de la pestaña `validacion` prevalecen, salvo que el script detecte un sistema (el veredicto queda como desactualizado).
 6. **Descubre proveedores faltantes**: cuenta los dominios externos de `<script>` e `<iframe>` de todas las webs (filtrando ruido de `IGNORED_DOMAINS`) y los reporta por frecuencia.
 7. **Historial**: guarda una foto diaria (fecha, Place ID, nombre, reseñas, rating) y calcula `Reseñas/mes (historial)` cuando hay al menos 14 días de historia.
 
 ### Estado de implementación (2026-09-25)
-Puntos 1–7 implementados. **Pendiente:** reintentos en las llamadas a Places (hoy un error 429/5xx corta la ejecución).
+Puntos 1–7 implementados, junto con los reintentos en Places y la pestaña `validacion`.
 
 ### Salidas
-Google Sheet con tres pestañas:
+Google Sheet con cuatro pestañas:
 - `resultados`: un restaurante por fila, ordenado por prioridad.
 - `dominios_externos`: dominios de terceros; la columna clave es "En restaurantes sin sistema detectado".
 - `historial`: se acumula entre ejecuciones y **nunca se borra**. Es la fuente de verdad del historial.
+- `validacion`: se escribe a mano (Place ID, Nombre, Veredicto de una lista cerrada, Nota, Fecha). El script solo la lee; **nunca se borra**. El seguimiento comercial va en otra hoja.
 
 Respaldos locales: `resultados_restaurantes.csv`, `dominios_externos.csv`, `historial_resenas.csv` (ignorados por git).
 
