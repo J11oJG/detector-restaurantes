@@ -2,24 +2,34 @@
 Detector de restaurantes sin sistema de reservas digital.
 
 1. Busca restaurantes con Google Places API (New) - Text Search.
-2. Descarga la web de cada uno (home + página de reservas si existe).
+2. Descarga la web de cada uno (home + páginas de reservas si existen).
 3. Busca firmas de widgets de reservas conocidos (CoverManager, TheFork, etc.).
-4. Clasifica, prioriza y escribe todo en una Google Sheet.
+4. Prioriza por percentiles de reseñas calculados sobre los propios datos.
+5. Cuenta los dominios externos (scripts/iframes) de todas las webs para
+   descubrir proveedores que no están en la lista de firmas.
+6. Guarda una foto del total de reseñas de cada restaurante en la pestaña
+   "historial" (se acumula entre ejecuciones) y, cuando hay historia suficiente,
+   calcula las reseñas por mes reales.
+7. Escribe todo en Google Sheets (pestañas "resultados", "dominios_externos"
+   e "historial") y en CSV de respaldo.
 
 Requisitos:
-    pip install requests gspread
+    pip install requests gspread python-dotenv
 
-Variables de entorno:
+Variables de entorno (.env):
     GOOGLE_PLACES_API_KEY   API key con "Places API (New)" habilitada
-    SHEET_ID                ID de la Google Sheet (lo que va entre /d/ y /edit en la URL)
-    GOOGLE_SA_FILE          Ruta al JSON de la service account (por defecto service_account.json)
+    SHEET_ID                ID de la Google Sheet (lo que va entre /d/ y /edit)
+    GOOGLE_SA_FILE          Ruta al JSON de la service account
 """
 
 import csv
 import os
 import re
+import statistics
 import time
 import concurrent.futures as cf
+from collections import Counter, defaultdict
+from datetime import date
 from urllib.parse import urljoin, urlparse
 
 import gspread
@@ -35,8 +45,6 @@ load_dotenv()
 API_KEY = os.environ["GOOGLE_PLACES_API_KEY"]
 SHEET_ID = os.environ["SHEET_ID"]
 SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SA_FILE", "service_account.json")
-WORKSHEET_NAME = "resultados"
-CSV_BACKUP = "resultados_restaurantes.csv"
 
 # Text Search devuelve máximo 60 resultados por consulta,
 # así que conviene dividir por barrio y tipo de cocina.
@@ -51,14 +59,29 @@ QUERIES = [
     "restaurantes en La Maternitat i Sant Ramon, Barcelona",
 ]
 
-# Umbrales de prioridad según número de reseñas en Google (proxy de volumen de llamadas)
-UMBRAL_ALTA = 300
-UMBRAL_MEDIA = 100
+# Prioridad por percentiles de reseñas, calculados sobre los resultados de cada
+# ejecución: se adapta solo a la zona (Barcelona vs. Vilanova, por ejemplo).
+#   reseñas >= percentil 75 -> Alta   (el 25% con más reseñas)
+#   reseñas >= percentil 25 -> Media  (el 50% del medio)
+#   resto                   -> Baja
+PERCENTIL_ALTA = 75
+PERCENTIL_MEDIA = 25
+# Si hay muy pocos datos para percentiles, se usan estos valores fijos.
+UMBRAL_ALTA_FALLBACK = 300
+UMBRAL_MEDIA_FALLBACK = 100
 
 MAX_WORKERS = 10
 TIMEOUT = 10
 
-# Firmas de sistemas de reservas (se buscan en el HTML en minúsculas)
+# Días mínimos entre la primera foto del historial y hoy para calcular
+# reseñas/mes (con menos días, la cifra es demasiado ruidosa).
+MIN_DIAS_HISTORIAL = 14
+
+# Un dominio externo se reporta si aparece en al menos este número de restaurantes.
+MIN_RESTAURANTES_DOMINIO = 2
+
+# Firmas de sistemas de reservas (se buscan en el HTML en minúsculas).
+# Amplía esta lista con lo que descubras en la pestaña "dominios_externos".
 BOOKING_SIGNATURES = {
     "CoverManager": ["covermanager"],
     "TheFork": ["thefork", "lafourchette", "eltenedor"],
@@ -87,7 +110,24 @@ MANUAL_SIGNALS = {
     ],
 }
 
+# Dominios de infraestructura que aparecen en casi todas las webs y no aportan
+# nada (analítica, CDNs, redes sociales, constructores de webs, cookies).
+IGNORED_DOMAINS = {
+    "google.com", "googleapis.com", "gstatic.com", "googletagmanager.com",
+    "google-analytics.com", "doubleclick.net", "googlesyndication.com",
+    "recaptcha.net", "facebook.net", "facebook.com", "instagram.com",
+    "twitter.com", "x.com", "tiktok.com", "pinterest.com", "linkedin.com",
+    "youtube.com", "youtube-nocookie.com", "vimeo.com",
+    "cloudflare.com", "cloudflareinsights.com", "jsdelivr.net", "unpkg.com",
+    "jquery.com", "bootstrapcdn.com", "fontawesome.com", "typekit.net",
+    "wp.com", "wordpress.com", "wixstatic.com", "parastorage.com",
+    "squarespace.com", "sqspcdn.com", "shopify.com", "gravatar.com",
+    "cookiebot.com", "onetrust.com", "cookielaw.org", "hotjar.com",
+}
+
 RESERVATION_LINK_HINTS = ("reserv", "booking", "book", "mesa")
+SRC_RE = re.compile(r'<(?:script|iframe)[^>]+?src=["\']([^"\']+)["\']', re.I)
+HREF_RE = re.compile(r'href=["\']([^"\'#]+)["\']', re.I)
 
 HTTP_HEADERS = {
     "User-Agent": (
@@ -111,10 +151,34 @@ FIELD_MASK = ",".join([
     "nextPageToken",
 ])
 
-HEADER = [
-    "Nombre", "Dirección", "Teléfono", "Web", "Rating", "Nº reseñas",
-    "Estado", "Sistemas detectados", "Señales manuales",
-    "Reservable en Google", "Prioridad", "Google Maps", "Place ID",
+ESTADO_USA = "Usa sistema"
+ESTADO_SIN_SISTEMA = "Sin sistema detectado"
+ESTADO_GOOGLE = "Reservable en Google (proveedor no identificado)"
+ESTADO_SIN_WEB = "Sin web"
+ESTADO_NO_ACCESIBLE = "Web no accesible"
+
+# Columnas de la pestaña "resultados": (encabezado, clave del diccionario)
+COLUMNAS = [
+    ("Nombre", "nombre"),
+    ("Dirección", "direccion"),
+    ("Teléfono", "telefono"),
+    ("Web", "web"),
+    ("Rating", "rating"),
+    ("Nº reseñas", "resenas"),
+    ("Reseñas/mes (historial)", "velocidad"),
+    ("Estado", "estado"),
+    ("Prioridad", "prioridad"),
+    ("Sistemas detectados", "sistemas"),
+    ("Señales manuales", "manuales"),
+    ("Reservable en Google", "reservable"),
+    ("Dominios externos", "dominios"),
+    ("Google Maps", "maps"),
+    ("Place ID", "place_id"),
+]
+HEADER_HISTORIAL = ["Fecha", "Place ID", "Nombre", "Nº reseñas", "Rating"]
+HEADER_DOMINIOS = [
+    "Dominio", "Nº restaurantes", "En restaurantes sin sistema detectado",
+    "Firma conocida", "Ejemplos",
 ]
 
 
@@ -161,11 +225,20 @@ def fetch(url: str) -> str | None:
         return None
 
 
+def normalizar_dominio(netloc: str) -> str:
+    netloc = netloc.lower().split(":")[0]
+    return netloc[4:] if netloc.startswith("www.") else netloc
+
+
+def es_ignorado(dominio: str) -> bool:
+    return any(dominio == d or dominio.endswith("." + d) for d in IGNORED_DOMAINS)
+
+
 def find_reservation_pages(html: str, base_url: str, limit: int = 2) -> list[str]:
     """Links de la misma web que parecen página de reservas."""
     base_domain = urlparse(base_url).netloc
     links = []
-    for href in re.findall(r'href=["\']([^"\'#]+)["\']', html):
+    for href in HREF_RE.findall(html):
         full = urljoin(base_url, href)
         if urlparse(full).netloc != base_domain:
             continue
@@ -176,80 +249,219 @@ def find_reservation_pages(html: str, base_url: str, limit: int = 2) -> list[str
     return links
 
 
+def dominios_externos(html: str, page_url: str, dominio_propio: str) -> set[str]:
+    """Dominios de terceros cargados vía <script src> o <iframe src>."""
+    encontrados = set()
+    for src in SRC_RE.findall(html):
+        dominio = normalizar_dominio(urlparse(urljoin(page_url, src)).netloc)
+        if not dominio or es_ignorado(dominio):
+            continue
+        if dominio == dominio_propio or dominio.endswith("." + dominio_propio):
+            continue
+        encontrados.add(dominio)
+    return encontrados
+
+
 def detect(html: str, signatures: dict) -> list[str]:
     return [name for name, sigs in signatures.items() if any(s in html for s in sigs)]
 
 
-def prioridad(estado: str, reviews: int) -> str:
-    if estado == "Usa sistema":
-        return "Descartar"
-    if reviews >= UMBRAL_ALTA:
-        return "Alta"
-    if reviews >= UMBRAL_MEDIA:
-        return "Media"
-    return "Baja"
-
-
-def analyze(place: dict) -> list:
+def analyze(place: dict) -> dict:
     website = place.get("websiteUri", "")
-    reviews = place.get("userRatingCount", 0) or 0
-    sistemas, manuales = [], []
+    reservable = place.get("reservable")
+    sistemas, manuales, dominios = [], [], set()
 
     if not website:
-        estado = "Sin web"
+        estado = ESTADO_GOOGLE if reservable else ESTADO_SIN_WEB
     else:
         html = fetch(website)
         if html is None:
-            estado = "Web no accesible"
+            estado = ESTADO_NO_ACCESIBLE
         else:
-            pages = [html]
+            dominio_propio = normalizar_dominio(urlparse(website).netloc)
+            paginas = [(website, html)]
             for link in find_reservation_pages(html, website):
                 sub = fetch(link)
                 if sub:
-                    pages.append(sub)
-            full_html = "\n".join(pages)
+                    paginas.append((link, sub))
+
+            full_html = "\n".join(h for _, h in paginas)
             sistemas = detect(full_html, BOOKING_SIGNATURES)
             manuales = detect(full_html, MANUAL_SIGNALS)
-            estado = "Usa sistema" if sistemas else "Sin sistema detectado"
+            for url, h in paginas:
+                dominios |= dominios_externos(h, url, dominio_propio)
 
-    reservable = place.get("reservable")
-    return [
-        place.get("displayName", {}).get("text", ""),
-        place.get("formattedAddress", ""),
-        place.get("nationalPhoneNumber", ""),
-        website,
-        place.get("rating", ""),
-        reviews,
-        estado,
-        ", ".join(sistemas),
-        ", ".join(manuales),
-        "Sí" if reservable else ("No" if reservable is False else ""),
-        prioridad(estado, reviews),
-        place.get("googleMapsUri", ""),
-        place.get("id", ""),
+            if sistemas:
+                estado = ESTADO_USA
+            elif reservable:
+                estado = ESTADO_GOOGLE
+            else:
+                estado = ESTADO_SIN_SISTEMA
+
+    return {
+        "nombre": place.get("displayName", {}).get("text", ""),
+        "direccion": place.get("formattedAddress", ""),
+        "telefono": place.get("nationalPhoneNumber", ""),
+        "web": website,
+        "rating": place.get("rating", ""),
+        "resenas": place.get("userRatingCount", 0) or 0,
+        "velocidad": "",
+        "estado": estado,
+        "prioridad": "",
+        "sistemas": sistemas,
+        "manuales": manuales,
+        "reservable": "Sí" if reservable else ("No" if reservable is False else ""),
+        "dominios": dominios,
+        "maps": place.get("googleMapsUri", ""),
+        "place_id": place.get("id", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Priorización y descubrimiento de proveedores
+# ---------------------------------------------------------------------------
+
+def asignar_prioridad(filas: list[dict]) -> tuple[float, float]:
+    resenas = [f["resenas"] for f in filas if f["resenas"] > 0]
+
+    if len(resenas) >= 4:
+        cortes = statistics.quantiles(resenas, n=100, method="inclusive")
+        umbral_alta = cortes[PERCENTIL_ALTA - 1]
+        umbral_media = cortes[PERCENTIL_MEDIA - 1]
+    else:
+        umbral_alta, umbral_media = UMBRAL_ALTA_FALLBACK, UMBRAL_MEDIA_FALLBACK
+
+    niveles = ["Alta", "Media", "Baja"]
+    for f in filas:
+        if f["estado"] == ESTADO_USA:
+            f["prioridad"] = "Descartar"
+            continue
+        if f["resenas"] >= umbral_alta:
+            p = "Alta"
+        elif f["resenas"] >= umbral_media:
+            p = "Media"
+        else:
+            p = "Baja"
+        # Si Google indica que ya aceptan reservas online, bajamos un nivel:
+        # probablemente tienen un proveedor que no detectamos.
+        if f["estado"] == ESTADO_GOOGLE and p != "Baja":
+            p = niveles[niveles.index(p) + 1]
+        f["prioridad"] = p
+
+    return umbral_alta, umbral_media
+
+
+def contar_dominios(filas: list[dict]) -> list[list]:
+    total, sin_sistema = Counter(), Counter()
+    ejemplos = defaultdict(list)
+
+    for f in filas:
+        for d in f["dominios"]:
+            total[d] += 1
+            if f["estado"] != ESTADO_USA:
+                sin_sistema[d] += 1
+            if len(ejemplos[d]) < 3:
+                ejemplos[d].append(f["nombre"])
+
+    salida = []
+    for dominio, n in total.most_common():
+        if n < MIN_RESTAURANTES_DOMINIO:
+            break
+        firma = next(
+            (nombre for nombre, sigs in BOOKING_SIGNATURES.items()
+             if any(s.rstrip("/") in dominio for s in sigs)),
+            "",
+        )
+        salida.append([dominio, n, sin_sistema[dominio], firma, ", ".join(ejemplos[dominio])])
+    return salida
+
+
+# ---------------------------------------------------------------------------
+# Historial de reseñas
+# ---------------------------------------------------------------------------
+
+def leer_historial(sh) -> tuple[object, dict[str, list[tuple[date, int]]]]:
+    """Devuelve la pestaña 'historial' y un dict place_id -> [(fecha, reseñas)]."""
+    try:
+        ws = sh.worksheet("historial")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="historial", rows=1000, cols=len(HEADER_HISTORIAL))
+        ws.update(values=[HEADER_HISTORIAL], range_name="A1")
+        ws.freeze(rows=1)
+        return ws, {}
+
+    historial = defaultdict(list)
+    for fila in ws.get_all_values()[1:]:
+        try:
+            historial[fila[1]].append((date.fromisoformat(fila[0]), int(fila[3])))
+        except (IndexError, ValueError):
+            continue
+    return ws, historial
+
+
+def calcular_velocidad(filas: list[dict], historial: dict) -> None:
+    """Reseñas por mes desde la foto más antigua del historial."""
+    hoy = date.today()
+    for f in filas:
+        fotos = historial.get(f["place_id"])
+        if not fotos:
+            continue
+        fecha_ini, resenas_ini = min(fotos)
+        dias = (hoy - fecha_ini).days
+        if dias >= MIN_DIAS_HISTORIAL:
+            f["velocidad"] = round((f["resenas"] - resenas_ini) / dias * 30, 1)
+
+
+def guardar_historial(ws, filas: list[dict], historial: dict) -> list[list]:
+    """Agrega la foto de hoy (una sola por restaurante y día)."""
+    hoy = date.today()
+    nuevas = [
+        [hoy.isoformat(), f["place_id"], f["nombre"], f["resenas"], f["rating"]]
+        for f in filas
+        if not any(fecha == hoy for fecha, _ in historial.get(f["place_id"], []))
     ]
+    if nuevas:
+        ws.append_rows(nuevas, value_input_option="RAW")
+    return nuevas
+
+
+def append_csv(path: str, header: list[str], rows: list[list]) -> None:
+    existe = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        if not existe:
+            writer.writerow(header)
+        writer.writerows(rows)
 
 
 # ---------------------------------------------------------------------------
 # Salida
 # ---------------------------------------------------------------------------
 
-def write_csv(rows: list[list]) -> None:
-    with open(CSV_BACKUP, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(HEADER)
+def fila_a_lista(f: dict) -> list:
+    fila = []
+    for _, clave in COLUMNAS:
+        valor = f[clave]
+        if isinstance(valor, (list, set)):
+            valor = ", ".join(sorted(valor))
+        fila.append(valor)
+    return fila
+
+
+def write_csv(path: str, header: list[str], rows: list[list]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(header)
         writer.writerows(rows)
 
 
-def write_sheet(rows: list[list]) -> None:
-    gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
-    sh = gc.open_by_key(SHEET_ID)
+def write_worksheet(sh, nombre: str, header: list[str], rows: list[list]) -> None:
     try:
-        ws = sh.worksheet(WORKSHEET_NAME)
+        ws = sh.worksheet(nombre)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows=len(rows) + 10, cols=len(HEADER))
+        ws = sh.add_worksheet(title=nombre, rows=len(rows) + 10, cols=len(header))
     ws.clear()
-    ws.update(values=[HEADER] + rows, range_name="A1")
+    ws.update(values=[header] + rows, range_name="A1")
     ws.freeze(rows=1)
 
 
@@ -267,22 +479,49 @@ def main() -> None:
 
     print("Analizando webs...")
     with cf.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        rows = list(ex.map(analyze, places.values()))
+        filas = list(ex.map(analyze, places.values()))
+
+    gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
+    sh = gc.open_by_key(SHEET_ID)
+    ws_historial, historial = leer_historial(sh)
+    calcular_velocidad(filas, historial)
+
+    umbral_alta, umbral_media = asignar_prioridad(filas)
+    print(f"Umbrales de reseñas: Alta >= {umbral_alta:.0f}, Media >= {umbral_media:.0f}")
 
     orden = {"Alta": 0, "Media": 1, "Baja": 2, "Descartar": 3}
-    rows.sort(key=lambda r: (orden[r[10]], -r[5]))
+    filas.sort(key=lambda f: (orden[f["prioridad"]], -f["resenas"]))
 
-    write_csv(rows)
-    print(f"Backup guardado en {CSV_BACKUP}")
+    header = [h for h, _ in COLUMNAS]
+    rows = [fila_a_lista(f) for f in filas]
+    dominios = contar_dominios(filas)
 
-    write_sheet(rows)
-    print("Google Sheet actualizada.")
+    write_csv("resultados_restaurantes.csv", header, rows)
+    write_csv("dominios_externos.csv", HEADER_DOMINIOS, dominios)
+    print("Backups CSV guardados.")
 
-    resumen = {}
-    for r in rows:
-        resumen[r[6]] = resumen.get(r[6], 0) + 1
-    for estado, n in sorted(resumen.items(), key=lambda x: -x[1]):
+    write_worksheet(sh, "resultados", header, rows)
+    write_worksheet(sh, "dominios_externos", HEADER_DOMINIOS, dominios)
+    nuevas = guardar_historial(ws_historial, filas, historial)
+    append_csv("historial_resenas.csv", HEADER_HISTORIAL, nuevas)
+    print(f"Google Sheet actualizada ({len(nuevas)} fotos nuevas en historial).")
+
+    con_velocidad = sum(1 for f in filas if f["velocidad"] != "")
+    if con_velocidad:
+        print(f"Reseñas/mes calculadas para {con_velocidad} restaurantes.")
+    else:
+        print(f"Aún sin historia suficiente para reseñas/mes "
+              f"(se necesitan al menos {MIN_DIAS_HISTORIAL} días entre ejecuciones).")
+
+    print("\nResumen por estado:")
+    for estado, n in Counter(f["estado"] for f in filas).most_common():
         print(f"  {estado}: {n}")
+
+    desconocidos = [d for d in dominios if not d[3] and d[2] > 0][:10]
+    if desconocidos:
+        print("\nDominios externos frecuentes sin firma conocida (revisar):")
+        for d in desconocidos:
+            print(f"  {d[0]}: {d[1]} restaurantes")
 
 
 if __name__ == "__main__":
