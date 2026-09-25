@@ -24,12 +24,7 @@ En España el software de reservas está concentrado en dos actores: **CoverMana
 7. **Historial**: guarda una foto diaria (fecha, Place ID, nombre, reseñas, rating) y calcula `Reseñas/mes (historial)` cuando hay al menos 14 días de historia.
 
 ### Estado de implementación (2026-09-25)
-El código actual cubre los puntos 1–3 y una versión simple de 4–5. **Pendiente:**
-- Estado `Reservable en Google (proveedor no identificado)` (hoy `reservable` solo se muestra como columna).
-- Percentiles (hoy usa umbrales fijos `UMBRAL_ALTA=300`, `UMBRAL_MEDIA=100`) y bajar un nivel a los reservables.
-- Punto 6 (`dominios_externos`, `IGNORED_DOMAINS`).
-- Punto 7 (`historial`).
-- Reintentos en las llamadas a Places.
+Puntos 1–7 implementados. **Pendiente:** reintentos en las llamadas a Places (hoy un error 429/5xx corta la ejecución).
 
 ### Salidas
 Google Sheet con tres pestañas:
