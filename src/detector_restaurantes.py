@@ -60,6 +60,13 @@ QUERIES = [
     "restaurantes en La Maternitat i Sant Ramon, Barcelona",
 ]
 
+# Text Search no se limita a la zona pedida: devuelve también locales vecinos
+# (~15% fuera de Les Corts en la primera ejecución). Solo se conservan los de
+# estos distritos (componente sublocality_level_1 de la dirección). El código
+# postal no sirve: 08014, 08028, 08029 y 08034 se comparten con otros distritos.
+# Conjunto vacío = sin filtro.
+DISTRITOS = {"Les Corts"}
+
 # Prioridad por percentiles de reseñas, calculados sobre los resultados de cada
 # ejecución: se adapta solo a la zona (Barcelona vs. Vilanova, por ejemplo).
 #   reseñas >= percentil 75 -> Alta   (el 25% con más reseñas)
@@ -161,6 +168,7 @@ FIELD_MASK = ",".join([
     "places.userRatingCount",
     "places.googleMapsUri",
     "places.reservable",
+    "places.addressComponents",
     "nextPageToken",
 ])
 
@@ -249,6 +257,13 @@ def search_places(query: str) -> list[dict]:
 
     print(f"  '{query}': {len(results)} resultados")
     return results
+
+
+def distrito(place: dict) -> str:
+    for comp in place.get("addressComponents", []):
+        if "sublocality_level_1" in comp.get("types", []):
+            return comp.get("longText", "")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +583,9 @@ def main() -> None:
         for p in search_places(q):
             places[p["id"]] = p  # deduplicar entre consultas
     print(f"Total únicos: {len(places)}")
+    if DISTRITOS:
+        places = {pid: p for pid, p in places.items() if distrito(p) in DISTRITOS}
+        print(f"En {', '.join(sorted(DISTRITOS))}: {len(places)}")
 
     print("Analizando webs...")
     with cf.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
