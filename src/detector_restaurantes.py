@@ -131,6 +131,10 @@ IGNORED_DOMAINS = {
     "cookiebot.com", "onetrust.com", "cookielaw.org", "hotjar.com",
 }
 
+# Si la "web" registrada en Google es un perfil de estos dominios, el local no
+# tiene web propia. No se descarga: solo devolvería una página de login.
+REDES_SOCIALES = {"instagram.com", "facebook.com", "tiktok.com", "linktr.ee"}
+
 RESERVATION_LINK_HINTS = ("reserv", "booking", "book", "mesa")
 SRC_RE = re.compile(r'<(?:script|iframe)[^>]+?src=["\']([^"\']+)["\']', re.I)
 HREF_RE = re.compile(r'href=["\']([^"\'#]+)["\']', re.I)
@@ -162,6 +166,10 @@ ESTADO_SIN_SISTEMA = "Sin sistema detectado"
 ESTADO_GOOGLE = "Reservable en Google (proveedor no identificado)"
 ESTADO_SIN_WEB = "Sin web"
 ESTADO_NO_ACCESIBLE = "Web no accesible"
+ESTADO_REDES = "Solo redes sociales"
+
+# Candidato = restaurante sin sistema de reservas conocido (ver CONTEXT.md).
+ESTADOS_CANDIDATO = {ESTADO_SIN_SISTEMA, ESTADO_SIN_WEB, ESTADO_REDES}
 
 # Columnas de la pestaña "resultados": (encabezado, clave del diccionario)
 COLUMNAS = [
@@ -252,8 +260,12 @@ def normalizar_dominio(netloc: str) -> str:
     return netloc[4:] if netloc.startswith("www.") else netloc
 
 
+def pertenece(dominio: str, dominios: set[str]) -> bool:
+    return any(dominio == d or dominio.endswith("." + d) for d in dominios)
+
+
 def es_ignorado(dominio: str) -> bool:
-    return any(dominio == d or dominio.endswith("." + d) for d in IGNORED_DOMAINS)
+    return pertenece(dominio, IGNORED_DOMAINS)
 
 
 def find_reservation_pages(html: str, base_url: str, limit: int = 2) -> list[str]:
@@ -295,6 +307,8 @@ def analyze(place: dict) -> dict:
 
     if not website:
         estado = ESTADO_GOOGLE if reservable else ESTADO_SIN_WEB
+    elif pertenece(normalizar_dominio(urlparse(website).netloc), REDES_SOCIALES):
+        estado = ESTADO_GOOGLE if reservable else ESTADO_REDES
     else:
         home = fetch(website)
         if home is None:
@@ -536,7 +550,9 @@ def main() -> None:
         print(f"Aún sin historia suficiente para reseñas/mes "
               f"(se necesitan al menos {MIN_DIAS_HISTORIAL} días entre ejecuciones).")
 
-    print("\nResumen por estado:")
+    candidatos = sum(1 for f in filas if f["estado"] in ESTADOS_CANDIDATO)
+    print(f"\nCandidatos: {candidatos} de {len(filas)}")
+    print("Resumen por estado:")
     for estado, n in Counter(f["estado"] for f in filas).most_common():
         print(f"  {estado}: {n}")
 
