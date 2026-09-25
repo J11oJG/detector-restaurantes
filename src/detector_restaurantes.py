@@ -47,25 +47,30 @@ API_KEY = os.environ["GOOGLE_PLACES_API_KEY"]
 SHEET_ID = os.environ["SHEET_ID"]
 SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SA_FILE", "service_account.json")
 
+# Consultas por distrito. Los distritos se acumulan: cada ejecución cubre todos,
+# porque la pestaña "resultados" se reescribe entera. Cada distrito cuesta ~24
+# requests por ejecución (8 consultas x 3 páginas); la cuota diaria es 200.
 # Text Search devuelve máximo 60 resultados por consulta,
 # así que conviene dividir por barrio y tipo de cocina.
-QUERIES = [
-    "restaurantes en Les Corts, Barcelona",
-    "bares de tapas en Les Corts, Barcelona",
-    "restaurante mediterráneo en Les Corts, Barcelona",
-    "restaurante italiano en Les Corts, Barcelona",
-    "restaurante japonés en Les Corts, Barcelona",
-    "restaurante latinoamericano en Les Corts, Barcelona",
-    "restaurantes en Pedralbes, Barcelona",
-    "restaurantes en La Maternitat i Sant Ramon, Barcelona",
-]
+QUERIES_POR_DISTRITO = {
+    "Les Corts": [
+        "restaurantes en Les Corts, Barcelona",
+        "bares de tapas en Les Corts, Barcelona",
+        "restaurante mediterráneo en Les Corts, Barcelona",
+        "restaurante italiano en Les Corts, Barcelona",
+        "restaurante japonés en Les Corts, Barcelona",
+        "restaurante latinoamericano en Les Corts, Barcelona",
+        "restaurantes en Pedralbes, Barcelona",
+        "restaurantes en La Maternitat i Sant Ramon, Barcelona",
+    ],
+}
 
 # Text Search no se limita a la zona pedida: devuelve también locales vecinos
 # (~15% fuera de Les Corts en la primera ejecución). Solo se conservan los de
-# estos distritos (componente sublocality_level_1 de la dirección). El código
-# postal no sirve: 08014, 08028, 08029 y 08034 se comparten con otros distritos.
-# Conjunto vacío = sin filtro.
-DISTRITOS = {"Les Corts"}
+# los distritos configurados (componente sublocality_level_1 de la dirección,
+# que debe coincidir con la clave de QUERIES_POR_DISTRITO). El código postal no
+# sirve: 08014, 08028, 08029 y 08034 se comparten con otros distritos.
+DISTRITOS = set(QUERIES_POR_DISTRITO)
 
 # Prioridad por percentiles de reseñas, calculados sobre los resultados de cada
 # ejecución: se adapta solo a la zona (Barcelona vs. Vilanova, por ejemplo).
@@ -210,6 +215,7 @@ COLUMNAS = [
     ("Nombre", "nombre"),
     ("Tipo", "tipo"),
     ("Dirección", "direccion"),
+    ("Distrito", "distrito"),
     ("Teléfono", "telefono"),
     ("Web", "web"),
     ("Rating", "rating"),
@@ -391,6 +397,7 @@ def analyze(place: dict) -> dict:
         "nombre": place.get("displayName", {}).get("text", ""),
         "tipo": place.get("primaryType", ""),
         "direccion": place.get("formattedAddress", ""),
+        "distrito": distrito(place),
         "telefono": place.get("nationalPhoneNumber", ""),
         "web": website,
         "rating": place.get("rating", ""),
@@ -608,13 +615,12 @@ def write_worksheet(sh, nombre: str, header: list[str], rows: list[list]) -> Non
 def main() -> None:
     print("Buscando restaurantes...")
     places = {}
-    for q in QUERIES:
+    for q in (q for qs in QUERIES_POR_DISTRITO.values() for q in qs):
         for p in search_places(q):
             places[p["id"]] = p  # deduplicar entre consultas
     print(f"Total únicos: {len(places)}")
-    if DISTRITOS:
-        places = {pid: p for pid, p in places.items() if distrito(p) in DISTRITOS}
-        print(f"En {', '.join(sorted(DISTRITOS))}: {len(places)}")
+    places = {pid: p for pid, p in places.items() if distrito(p) in DISTRITOS}
+    print(f"En {', '.join(sorted(DISTRITOS))}: {len(places)}")
     no_comida = [p for p in places.values() if not es_de_comida(p)]
     for p in no_comida:
         print(f"  Excluido (no es de comida): {p.get('displayName', {}).get('text', '')} "
@@ -631,8 +637,13 @@ def main() -> None:
     calcular_velocidad(filas, historial)
     aplicar_validacion(filas, leer_validacion(sh))
 
-    umbral_alta, umbral_media = asignar_prioridad(filas)
-    print(f"Umbrales de reseñas: Alta >= {umbral_alta:.0f}, Media >= {umbral_media:.0f}")
+    # Percentiles por distrito: cada zona tiene su propio nivel de reseñas.
+    print("Umbrales de reseñas:")
+    for nombre in sorted(DISTRITOS):
+        grupo = [f for f in filas if f["distrito"] == nombre]
+        umbral_alta, umbral_media = asignar_prioridad(grupo)
+        print(f"  {nombre} ({len(grupo)}): Alta >= {umbral_alta:.0f}, "
+              f"Media >= {umbral_media:.0f}")
 
     orden = {"Alta": 0, "Media": 1, "Baja": 2, "Descartar": 3}
     filas.sort(key=lambda f: (orden[f["prioridad"]], -f["resenas"]))
