@@ -370,10 +370,14 @@ def asignar_prioridad(filas: list[dict]) -> tuple[float, float]:
     else:
         umbral_alta, umbral_media = UMBRAL_ALTA_FALLBACK, UMBRAL_MEDIA_FALLBACK
 
-    niveles = ["Alta", "Media", "Baja"]
     for f in filas:
         if f["estado"] == ESTADO_USA:
             f["prioridad"] = "Descartar"
+            continue
+        # Reserve with Google solo funciona vía partners: casi seguro tienen un
+        # sistema que no detectamos. Baja fija hasta validar a mano algunos casos.
+        if f["estado"] == ESTADO_GOOGLE:
+            f["prioridad"] = "Baja"
             continue
         if f["resenas"] >= umbral_alta:
             p = "Alta"
@@ -381,10 +385,6 @@ def asignar_prioridad(filas: list[dict]) -> tuple[float, float]:
             p = "Media"
         else:
             p = "Baja"
-        # Si Google indica que ya aceptan reservas online, bajamos un nivel:
-        # probablemente tienen un proveedor que no detectamos.
-        if f["estado"] == ESTADO_GOOGLE and p != "Baja":
-            p = niveles[niveles.index(p) + 1]
         f["prioridad"] = p
 
     return umbral_alta, umbral_media
