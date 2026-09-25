@@ -109,8 +109,9 @@ BOOKING_SIGNATURES = {
 
 # Señales de reserva manual (español y catalán)
 MANUAL_SIGNALS = {
-    # Solo enlaces de chat: la palabra "whatsapp" suelta aparece en botones de compartir.
-    "WhatsApp": ["wa.me/", "api.whatsapp.com"],
+    # Solo enlaces de chat con un número. La palabra "whatsapp" suelta, wa.me/?text=
+    # y api.whatsapp.com/send?text= aparecen en botones de compartir.
+    "WhatsApp": ["wa.me/3", "wa.me/+", "wa.me/6", "wa.me/7", "send?phone="],
     "Teléfono": [
         "reservas por teléfono", "reserva por teléfono", "llámanos", "llamanos",
         "reservas al", "reserves per telèfon", "truca'ns", "trucan's",
