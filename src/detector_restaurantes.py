@@ -24,6 +24,9 @@ from urllib.parse import urljoin, urlparse
 
 import gspread
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Configuración
