@@ -87,6 +87,11 @@ TIPOS_SIN_RESERVA = {
     "fast_food_restaurant", "sandwich_shop", "meal_takeaway", "food_court",
 }
 
+# Text Search también devuelve lugares que no son de comida (un hospital, por
+# ejemplo). Se conservan los tipos con "restaurant" o "bar" como palabra, estos
+# tipos de comida sueltos y los que no traen tipo (mejor revisar que perder).
+TIPOS_COMIDA_EXTRA = TIPOS_SIN_RESERVA | {"cafeteria", "pub", "diner", "bistro"}
+
 MAX_WORKERS = 10
 TIMEOUT = 10
 
@@ -275,6 +280,14 @@ def distrito(place: dict) -> str:
         if "sublocality_level_1" in comp.get("types", []):
             return comp.get("longText", "")
     return ""
+
+
+def es_de_comida(place: dict) -> bool:
+    tipo = place.get("primaryType", "")
+    if not tipo or tipo in TIPOS_COMIDA_EXTRA:
+        return True
+    palabras = tipo.split("_")
+    return "restaurant" in palabras or "bar" in palabras
 
 
 # ---------------------------------------------------------------------------
@@ -600,6 +613,11 @@ def main() -> None:
     if DISTRITOS:
         places = {pid: p for pid, p in places.items() if distrito(p) in DISTRITOS}
         print(f"En {', '.join(sorted(DISTRITOS))}: {len(places)}")
+    no_comida = [p for p in places.values() if not es_de_comida(p)]
+    for p in no_comida:
+        print(f"  Excluido (no es de comida): {p.get('displayName', {}).get('text', '')} "
+              f"[{p.get('primaryType')}]")
+    places = {pid: p for pid, p in places.items() if es_de_comida(p)}
 
     print("Analizando webs...")
     with cf.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
