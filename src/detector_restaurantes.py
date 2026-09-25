@@ -298,7 +298,7 @@ def analyze(place: dict) -> dict:
     else:
         home = fetch(website)
         if home is None:
-            estado = ESTADO_NO_ACCESIBLE
+            estado = ESTADO_GOOGLE if reservable else ESTADO_NO_ACCESIBLE
         else:
             url_final, html = home
             dominio_propio = normalizar_dominio(urlparse(url_final).netloc)
